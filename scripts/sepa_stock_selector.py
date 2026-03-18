@@ -78,28 +78,42 @@ class SEPASelector:
             time.sleep(1.1 - elapsed)
         self._last_request_time = time.time()
     
-    def get_stock_list(self) -> List[str]:
+    def get_stock_list(self, csv_path: str = 'stock.csv') -> List[str]:
         """
-        获取全部A股上市股票列表
+        从CSV文件获取股票列表
+        
+        Args:
+            csv_path: CSV文件路径
+            
+        Returns:
+            股票代码列表
         """
-        if not self._api:
+        import os
+        
+        # 优先从项目根目录的stock.csv读取
+        project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        full_path = os.path.join(project_root, csv_path)
+        
+        if not os.path.exists(full_path):
+            # 尝试当前目录
+            full_path = csv_path
+        
+        if not os.path.exists(full_path):
+            logger.error(f"股票列表文件不存在: {full_path}")
             return []
         
         try:
-            self._check_rate_limit()
-            df = self._api.stock_basic(
-                exchange='',
-                list_status='L',
-                fields='ts_code,list_date'
-            )
-            if df is not None and not df.empty:
-                # 过滤ST股票和次新股
-                df['code'] = df['ts_code'].apply(lambda x: x.split('.')[0])
-                return df['code'].tolist()
+            df = pd.read_csv(full_path)
+            if 'stock_code' in df.columns:
+                # 提取纯数字代码（去掉.SH/.SZ后缀）
+                codes = df['stock_code'].astype(str).tolist()
+                return [c.split('.')[0] for c in codes if c.strip()]
+            else:
+                logger.error(f"CSV文件缺少stock_code列")
+                return []
         except Exception as e:
-            logger.error(f"获取股票列表失败: {e}")
-        
-        return []
+            logger.error(f"读取股票列表失败: {e}")
+            return []
     
     def get_stock_info(self, stock_code: str) -> Optional[Dict[str, Any]]:
         """

@@ -44,12 +44,22 @@ jobs:
       - name: 安装依赖
         run: |
           pip install --upgrade pip
-          pip install tushare pandas numpy
+          pip install tushare pandas numpy pyyaml
           pip install -r requirements.txt
       
       - name: 创建必要目录
         run: |
           mkdir -p data logs reports scripts
+      
+      # 确保stock.csv存在
+      - name: 检查股票列表文件
+        run: |
+          if [ ! -f "stock.csv" ]; then
+            echo "警告: stock.csv不存在，将使用Tushare获取全量股票"
+          else
+            echo "使用stock.csv中的股票列表"
+            head -5 stock.csv
+          fi
       
       - name: 执行SEPA选股
         id: sepa
