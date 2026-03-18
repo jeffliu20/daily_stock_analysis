@@ -1,0 +1,261 @@
+name: SEPA策略选股分析
+
+on:
+  # 定时触发 - 每天北京时间 19:00 (UTC 11:00)，在daily_analysis之前执行
+  schedule:
+    - cron: '0 11 * * 1-5'     # 周一到周五，UTC 11:00 = 北京时间 19:00
+  
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: '强制运行（跳过交易日检查）'
+        required: false
+        default: false
+        type: boolean
+
+# 并发控制
+concurrency:
+  group: sepa-analysis
+  cancel-in-progress: false
+
+jobs:
+  # Step 1: SEPA选股
+  sepa_selector:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    outputs:
+      stock_list: ${{ steps.sepa.outputs.STOCK_LIST }}
+      stock_count: ${{ steps.sepa.outputs.STOCK_COUNT }}
+    
+    steps:
+      - name: 随机延迟（避免固定时间访问）
+        run: sleep $((RANDOM % 30))
+      
+      - name: 检出代码
+        uses: actions/checkout@v5
+      
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install tushare pandas numpy
+          pip install -r requirements.txt
+      
+      - name: 创建必要目录
+        run: |
+          mkdir -p data logs reports scripts
+      
+      - name: 执行SEPA选股
+        id: sepa
+        env:
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+        run: |
+          echo "=========================================="
+          echo "🚀 SEPA策略选股"
+          echo "=========================================="
+          echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo ""
+          
+          # 执行选股脚本
+          python scripts/sepa_stock_selector.py --limit 50 2>&1 | tee logs/sepa_selector.log
+          
+          # 从日志中提取选股结果
+          # 格式: 股票代码: 600519,300750,002594
+          STOCK_LIST=$(grep "股票代码:" logs/sepa_selector.log | sed 's/股票代码: //' || echo "")
+          STOCK_COUNT=$(echo "$STOCK_LIST" | tr ',' '\n' | wc -l || echo "0")
+          
+          echo "选股结果: $STOCK_LIST"
+          echo "选股数量: $STOCK_COUNT"
+          
+          # 设置输出
+          echo "STOCK_LIST=$STOCK_LIST" >> $GITHUB_OUTPUT
+          echo "STOCK_COUNT=$STOCK_COUNT" >> $GITHUB_OUTPUT
+          
+          # 检查是否有选中股票
+          if [ -z "$STOCK_LIST" ]; then
+            echo "⚠️ 警告: 选股结果为空"
+            exit 0
+          fi
+      
+      - name: 上传选股日志
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: sepa-logs-${{ github.run_number }}
+          path: logs/sepa_selector.log
+          retention-days: 7
+  
+  # Step 2: 每日分析（传入SEPA选出的股票）
+  daily_analysis:
+    needs: sepa_selector
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    # 只有当有选中股票时才运行
+    if: needs.sepa_selector.outputs.stock_count != '0' && needs.sepa_selector.outputs.stock_count != ''
+    
+    steps:
+      - name: 随机延迟
+        run: sleep $((RANDOM % 60))
+      
+      - name: 检出代码
+        uses: actions/checkout@v5
+      
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      
+      - name: 安装依赖
+        run: |
+          pip install --upgrade pip
+          pip install -r requirements.txt
+      
+      - name: 创建必要目录
+        run: |
+          mkdir -p data logs reports
+      
+      - name: 执行股票分析
+        env:
+          # ==========================================
+          # AI 配置
+          # ==========================================
+          LITELLM_CONFIG: ${{ vars.LITELLM_CONFIG || secrets.LITELLM_CONFIG }}
+          LITELLM_CONFIG_YAML: ${{ vars.LITELLM_CONFIG_YAML || secrets.LITELLM_CONFIG_YAML }}
+          LITELLM_API_KEY: ${{ secrets.LITELLM_API_KEY }}
+          LITELLM_MODEL: ${{ vars.LITELLM_MODEL || secrets.LITELLM_MODEL }}
+
+          # Gemini AI
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_MODEL: ${{ vars.GEMINI_MODEL || secrets.GEMINI_MODEL || 'gemini-3-flash-preview' }}
+          GEMINI_MODEL_FALLBACK: ${{ vars.GEMINI_MODEL_FALLBACK || secrets.GEMINI_MODEL_FALLBACK || 'gemini-2.5-flash' }}
+          
+          # AIHubMix
+          AIHUBMIX_KEY: ${{ secrets.AIHUBMIX_KEY }}
+
+          # OpenAI
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_BASE_URL: ${{ vars.OPENAI_BASE_URL || secrets.OPENAI_BASE_URL }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || secrets.OPENAI_MODEL }}
+
+          # Anthropic
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          ANTHROPIC_MODEL: ${{ vars.ANTHROPIC_MODEL || secrets.ANTHROPIC_MODEL || 'claude-3-5-sonnet-20241022' }}
+
+          # ==========================================
+          # 数据源
+          # ==========================================
+          TUSHARE_TOKEN: ${{ secrets.TUSHARE_TOKEN }}
+          
+          # ==========================================
+          # 搜索服务
+          # ==========================================
+          BOCHA_API_KEYS: ${{ secrets.BOCHA_API_KEYS }}
+          TAVILY_API_KEYS: ${{ secrets.TAVILY_API_KEYS }}
+          SERPAPI_API_KEYS: ${{ secrets.SERPAPI_API_KEYS }}
+          MINIMAX_API_KEYS: ${{ secrets.MINIMAX_API_KEYS }}
+          BRAVE_API_KEYS: ${{ secrets.BRAVE_API_KEYS }}
+          SEARXNG_BASE_URLS: ${{ secrets.SEARXNG_BASE_URLS }}
+          
+          # ==========================================
+          # 通知渠道
+          # ==========================================
+          WECHAT_WEBHOOK_URL: ${{ secrets.WECHAT_WEBHOOK_URL }}
+          WECHAT_MSG_TYPE: ${{ vars.WECHAT_MSG_TYPE || secrets.WECHAT_MSG_TYPE || 'markdown' }}
+          FEISHU_WEBHOOK_URL: ${{ secrets.FEISHU_WEBHOOK_URL }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          EMAIL_SENDER: ${{ vars.EMAIL_SENDER || secrets.EMAIL_SENDER }}
+          EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
+          EMAIL_RECEIVERS: ${{ vars.EMAIL_RECEIVERS || secrets.EMAIL_RECEIVERS }}
+          PUSHOVER_USER_KEY: ${{ secrets.PUSHOVER_USER_KEY }}
+          PUSHOVER_API_TOKEN: ${{ secrets.PUSHOVER_API_TOKEN }}
+          PUSHPLUS_TOKEN: ${{ secrets.PUSHPLUS_TOKEN }}
+          CUSTOM_WEBHOOK_URLS: ${{ secrets.CUSTOM_WEBHOOK_URLS }}
+          DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          SERVERCHAN3_SENDKEY: ${{ secrets.SERVERCHAN3_SENDKEY }}
+
+          # ==========================================
+          # 自选股配置 - 使用SEPA选股结果
+          # ==========================================
+          STOCK_LIST: ${{ needs.sepa_selector.outputs.stock_list }}
+          MARKET_REVIEW_REGION: ${{ vars.MARKET_REVIEW_REGION || secrets.MARKET_REVIEW_REGION || 'cn' }}
+          
+          # ==========================================
+          # 运行配置
+          # ==========================================
+          REPORT_TYPE: ${{ vars.REPORT_TYPE || secrets.REPORT_TYPE || 'simple' }}
+          SINGLE_STOCK_NOTIFY: ${{ vars.SINGLE_STOCK_NOTIFY || secrets.SINGLE_STOCK_NOTIFY || 'false' }}
+          MARKET_REVIEW_ENABLED: ${{ vars.MARKET_REVIEW_ENABLED || secrets.MARKET_REVIEW_ENABLED || 'true' }}
+          TRADING_DAY_CHECK_ENABLED: ${{ vars.TRADING_DAY_CHECK_ENABLED || secrets.TRADING_DAY_CHECK_ENABLED || 'true' }}
+          
+          # ==========================================
+          # 系统配置
+          # ==========================================
+          LOG_LEVEL: INFO
+          MAX_WORKERS: ${{ vars.MAX_WORKERS || secrets.MAX_WORKERS || '1' }}
+          ENABLE_CHIP_DISTRIBUTION: ${{ vars.ENABLE_CHIP_DISTRIBUTION || secrets.ENABLE_CHIP_DISTRIBUTION || 'false' }}
+          REALTIME_SOURCE_PRIORITY: ${{ vars.REALTIME_SOURCE_PRIORITY || 'tencent,akshare_sina,efinance,akshare_em' }}
+          
+        run: |
+          echo "=========================================="
+          echo "🚀 A股自选股智能分析系统 (SEPA策略)"
+          echo "=========================================="
+          echo "⏰ 时间: $(TZ='Asia/Shanghai' date '+%Y-%m-%d %H:%M:%S')"
+          echo "📊 SEPA选股: $STOCK_LIST"
+          echo "📝 报告类型: $REPORT_TYPE"
+          echo ""
+          
+          FORCE_RUN_ARG=""
+          if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
+            FORCE_RUN_ARG="--force-run"
+            echo "⚡ 已启用强制运行模式"
+          fi
+
+          # 分析SEPA选出的股票
+          python main.py $FORCE_RUN_ARG
+      
+      - name: 上传分析报告
+        uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: analysis-reports-sepa-${{ github.run_number }}
+          path: |
+            reports/
+            logs/
+          retention-days: 30
+      
+      - name: 显示运行结果
+        if: always()
+        run: |
+          echo ""
+          echo "=========================================="
+          echo "📊 SEPA分析完成"
+          echo "=========================================="
+          if [ -d "reports" ] && [ "$(ls -A reports 2>/dev/null)" ]; then
+            echo "生成的报告:"
+            ls -la reports/
+          else
+            echo "⚠️ 未生成报告文件"
+          fi
+
+  # 选股结果通知
+  notify_empty:
+    needs: sepa_selector
+    runs-on: ubuntu-latest
+    # 当选股结果为空时发送通知
+    if: needs.sepa_selector.outputs.stock_count == '0' || needs.sepa_selector.outputs.stock_count == ''
+    
+    steps:
+      - name: 发送空选股结果通知
+        if: env.WECHAT_WEBHOOK_URL != ''
+        run: |
+          echo "发送选股结果为空通知..."
+          # 可以在这里添加发送通知的逻辑
+          echo "今日SEPA选股无符合条件的股票"
